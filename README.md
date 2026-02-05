@@ -1,36 +1,57 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Auth Config Review
 
-## Getting Started
+## Verdict: ⚠️ Partially Correct (Broken Credentials)
 
-First, run the development server:
+You have made improvements to the Prisma schema, but there are still **two critical issues** that will prevent this from working correctly.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+### 1. `app/lib/auth.ts` - CRITICAL FIX NEEDED
+**Issue:** You are using `CredentialsProvider` along with a database `adapter`.
+**Why it fails:** By default, adding an adapter switches the session strategy to `"database"`. `CredentialsProvider` **does not support** the database strategy; it requires JWTs.
+**Fix:** You **MUST** force the session strategy to JWT.
+
+Add this line to your `NEXT_AUTH` object:
+
+```typescript
+export const NEXT_AUTH = {
+    adapter: PrismaAdapter(prisma),
+    session: { strategy: 'jwt' }, // <--- ADD THIS
+    providers: [ ... ],
+    // ...
+}
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. `prisma/schema.prisma` - DB Connection Missing
+**Issue:** Your `datasource db` block defines the provider but not the URL.
+**Fix:** Add the `url` field to point to your environment variable.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // <--- ADD THIS
+}
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 3. Schema Models - ✅ LOOKING GOOD
+The updates you made to `User`, `Account`, `Session`, and `VerificationToken` models appear to match the recommended NextAuth Prisma Adapter schema. This part is now correct!
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## Conceptual Q&A: Credentials + OAuth
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**Q: If I use Credentials and OAuth together, can I use the database `Session` table?**
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+**A: Generally, No.**
 
-## Deploy on Vercel
+Because the Session Strategy is a **global configuration** for the entire NextAuth handler, you cannot mix them (e.g., Database sessions for Discord users + JWT sessions for Password users).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1.  **Credentials Rule**: The `CredentialsProvider` **strictly requires** JWTs. It cannot save a session in the database because it doesn't create a persistent "Account" link in the way OAuth providers do.
+2.  **The Consequence**: Since one provider forces JWT, the **entire app** must use JWTs for sessions.
+3.  **The Result**:
+    *   **Discord Users**: Still have their `User` and `Account` saved in the database (so you know who they are).
+    *   **Session State**: Their *active login* is effectively "stateless" (stored in the browser cookie as a JWT), NOT in the `Session` table.
+    *   **The `Session` Table**: In a hybrid setup like this, the `Session` table usually remains empty or unused, because `strategy: "jwt"` bypasses it.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+**Summary Checklist for a working setup:**
+- [ ] Add `session: { strategy: 'jwt' }` to `auth.ts`
+- [ ] Add `url = env("DATABASE_URL")` to `schema.prisma`
+- [ ] Run `npx prisma generate` after changing the schema.
